@@ -98,7 +98,7 @@ def main() -> None:
         page = OUT / rel
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(render_page(title, body, url, date), encoding="utf-8")
-        items.append({"title": title, "date": date, "url": url, "body": body, "raw": raw, "slug": slug})
+        items.append({"title": title, "date": date, "url": url, "body": body, "raw": raw, "slug": slug, "source_path": path.name})
 
     cards = []
     for item in items:
@@ -129,7 +129,7 @@ def main() -> None:
         SubElement(node, f"{{{Y}}}full-text").text = plain_text(rss_body)
         SubElement(node, f"{{{CONTENT}}}encoded").text = MD.render(rss_body)
         SubElement(node, "description").text = plain_text(rss_body)[:400]
-        category_match = re.search(r"-(compliance|antifraud|osint|russia_news|world_news)-", path.name)
+        category_match = re.search(r"-(compliance|antifraud|osint|russia_news|world_news)-", item["source_path"])
         if category_match:
             categories = {
                 "compliance": "Комплаенс",
