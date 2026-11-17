@@ -120,9 +120,20 @@ def main() -> None:
         SubElement(node, "guid", {"isPermaLink": "true"}).text = item["url"]
         SubElement(node, "pubDate").text = item["date"].strftime("%a, %d %b %Y %H:%M:%S +0000")
         SubElement(node, f"{{{Y}}}genre").text = "article"
-        SubElement(node, f"{{{Y}}}full-text").text = plain_text(item["body"])
-        SubElement(node, f"{{{CONTENT}}}encoded").text = MD.render(item["body"])
-        SubElement(node, "description").text = plain_text(item["body"])[:400]
+        rss_body = feed_body(item["body"])
+        SubElement(node, f"{{{Y}}}full-text").text = plain_text(rss_body)
+        SubElement(node, f"{{{CONTENT}}}encoded").text = MD.render(rss_body)
+        SubElement(node, "description").text = plain_text(rss_body)[:400]
+        category_match = re.search(r"-(compliance|antifraud|osint|russia_news|world_news)-", path.name)
+        if category_match:
+            categories = {
+                "compliance": "Комплаенс",
+                "antifraud": "Антифрод",
+                "osint": "OSINT",
+                "russia_news": "Новости России",
+                "world_news": "Мировые новости",
+            }
+            SubElement(node, "category").text = categories[category_match.group(1)]
     ElementTree(rss).write(OUT / "feed.xml", encoding="utf-8", xml_declaration=True)
 
     sitemap = Element("urlset", {"xmlns": "http://www.sitemaps.org/schemas/sitemap/0.9"})
