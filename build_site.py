@@ -129,16 +129,7 @@ def main() -> None:
         SubElement(node, f"{{{Y}}}full-text").text = plain_text(rss_body)
         SubElement(node, f"{{{CONTENT}}}encoded").text = MD.render(rss_body)
         SubElement(node, "description").text = plain_text(rss_body)[:400]
-        category_match = re.search(r"-(compliance|antifraud|osint|russia_news|world_news)-", item["source_path"])
-        if category_match:
-            categories = {
-                "compliance": "Комплаенс",
-                "antifraud": "Антифрод",
-                "osint": "OSINT",
-                "russia_news": "Новости России",
-                "world_news": "Мировые новости",
-            }
-            SubElement(node, "category").text = categories[category_match.group(1)]
+
     ElementTree(rss).write(OUT / "feed.xml", encoding="utf-8", xml_declaration=True)
 
     sitemap = Element("urlset", {"xmlns": "http://www.sitemaps.org/schemas/sitemap/0.9"})
