@@ -56,8 +56,8 @@ def feed_body(markdown: str) -> str:
     return re.split(r"(?im)^##\s+источники\s*$", markdown, maxsplit=1)[0].strip()
 
 def plain_text(markdown: str) -> str:
-    body = re.sub(r"(?m)^#\s+.*$", "", markdown)
-    body = re.sub(r"(?m)^##?\s+", "", body)
+    body = re.sub(r"(?m)^#{1,6}\s+.*$", "", markdown)
+    body = re.sub(r"(?m)^#{1,6}\s+", "", body)
     body = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", body)
     body = re.sub(r"[*_\x60]", "", body)
     body = re.sub(r"(?m)^\s*[-*+]\s+", "• ", body)
