@@ -26,10 +26,25 @@ def article_date(path: Path) -> datetime:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
 
 def slug_for(path: Path) -> str:
-    name = path.stem
-    name = re.sub(r"^\d{8}T\d{6}Z-", "", name)
-    name = re.sub(r"^(compliance|antifraud|osint|russia_news|world_news)-", "", name)
-    return re.sub(r"[^a-zA-Z0-9а-яА-ЯёЁ-]+", "-", name).strip("-").lower() or "article"
+    # Keep article URLs short and ASCII-only for RSS compatibility.
+    stem = path.stem
+    stamp = re.match(r"^(\d{8})T\d{6}Z-", stem)
+    date_part = stamp.group(1) if stamp else "article"
+    name = re.sub(r"^\d{8}T\d{6}Z-", "", stem)
+    category = re.match(r"^(compliance|antifraud|osint|russia_news|world_news)-", name)
+    category_part = category.group(1) if category else "article"
+    if category:
+        name = name[category.end():]
+    translit = str.maketrans({
+        "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"yo","ж":"zh",
+        "з":"z","и":"i","й":"y","к":"k","л":"l","м":"m","н":"n","о":"o",
+        "п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"kh","ц":"ts",
+        "ч":"ch","ш":"sh","щ":"shch","ъ":"","ы":"y","ь":"","э":"e","ю":"yu","я":"ya",
+    })
+    ascii_name = name.lower().translate(translit)
+    ascii_name = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
+    # Timestamp + category prevent collisions between articles with similar titles.
+    return f"{date_part}-{category_part}-{ascii_name[:48]}".strip("-")
 
 def title_for(text: str, fallback: str) -> str:
     return next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), fallback)
