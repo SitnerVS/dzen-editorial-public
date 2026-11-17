@@ -50,6 +50,11 @@ def slug_for(path: Path) -> str:
 def title_for(text: str, fallback: str) -> str:
     return next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), fallback)
 
+def feed_body(markdown: str) -> str:
+    # Keep source bibliography on the article page; Yandex forbids source names
+    # inside yandex:full-text.
+    return re.split(r"(?im)^##\\s+источники\\s*$", markdown, maxsplit=1)[0].strip()
+
 def plain_text(markdown: str) -> str:
     body = re.sub(r"(?m)^#\s+.*$", "", markdown)
     body = re.sub(r"(?m)^##?\s+", "", body)
