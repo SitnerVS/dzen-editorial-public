@@ -1,0 +1,42 @@
+name: Private source tests — free cloud runner
+
+on:
+  schedule:
+    # 07:45 Moscow; run tests before the daily 08:00 topic analysis.
+    - cron: "45 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-source-tests
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout private editorial engine
+        uses: actions/checkout@v4
+        with:
+          repository: SitnerVS/dzen-editorial-engine
+          ref: main
+          token: ${{ secrets.DZEN_SOURCE_TOKEN }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Compile Python modules
+        run: python -m compileall -q app tests
+
+      - name: Run unit and integration tests
+        run: python -m unittest discover -s tests -v
