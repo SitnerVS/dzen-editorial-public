@@ -18,7 +18,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: dzen-automatic-editorial
@@ -153,12 +153,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m app.main --category "$CATEGORY" 2>&1 | tee /tmp/editorial-generate.log
+          if ! python -m app.main --category "$CATEGORY" > /tmp/editorial-generate.log 2>&1; then
+            echo "::error::Article generation failed. Detailed output is withheld from this public workflow log."
+            exit 1
+          fi
           ARTICLE="$(sed -n 's/^ARTICLE_PATH=//p' /tmp/editorial-generate.log | tail -n 1)"
           if [[ -z "$ARTICLE" || ! -f "$ARTICLE" ]]; then
             echo "::error::Article generator did not return an existing article file."
             exit 1
           fi
+          echo "Article generated successfully: $ARTICLE"
           echo "article=$ARTICLE" >> "$GITHUB_OUTPUT"
 
       - name: Commit generated article and history
@@ -207,8 +211,8 @@ jobs:
           for attempt in 1 2; do
             echo "Dzen publication attempt $attempt/2 for slot $EDITORIAL_SLOT_KEY"
             set +e
-            python -m app.dzen_publisher "$ARTICLE" 2>&1 | tee -a /tmp/dzen-publish.log
-            result=${PIPESTATUS[0]}
+            python -m app.dzen_publisher "$ARTICLE" >> /tmp/dzen-publish.log 2>&1
+            result=$?
             set -e
             if [[ "$result" -eq 0 ]] && grep -Eq "DZEN_PUBLISHED=1|DZEN_ALREADY_PUBLISHED=1" /tmp/dzen-publish.log; then
               echo "verified=true" >> "$GITHUB_OUTPUT"
@@ -216,11 +220,11 @@ jobs:
             fi
             if grep -Eqi "captcha|required.*captcha|капч" /tmp/dzen-publish.log; then
               echo "captcha_required=true" >> "$GITHUB_OUTPUT"
-              echo "::error::Dzen requested interactive CAPTCHA. The draft is retained; no bypass or blind retry."
+              echo "::error::Dzen requested interactive CAPTCHA. The draft is retained; no bypass or blind retry. Detailed publisher output is withheld from this public workflow log."
               exit "$result"
             fi
             if [[ "$attempt" -lt 2 ]]; then
-              echo "Temporary publication failure; retrying the same saved article and Dzen draft."
+              echo "Temporary publication failure; retrying the same saved article and Dzen draft. Detailed publisher output is withheld from this public workflow log."
               sleep 15
             fi
           done
