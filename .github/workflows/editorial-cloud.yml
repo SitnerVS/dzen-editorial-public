@@ -1,0 +1,267 @@
+name: Dzen — automatic editorial (free cloud runner)
+
+on:
+  schedule:
+    # 08:00 Moscow: build the daily 7-day demand analysis; 09:00–23:00: publish hourly.
+    - cron: "0 5-20 * * *"
+    # Half-hour watchdog: recover the same hourly slot without creating a duplicate.
+    - cron: "30 5-20 * * *"
+  push:
+    branches: [main]
+    paths:
+      - ".trigger-dzen-editorial"
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Optional topic override for a one-off run"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dzen-automatic-editorial
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # The workflow runs in this PUBLIC repository (free hosted runners),
+      # but checks out the actual editorial engine from its private repository.
+      - uses: actions/checkout@v4
+        with:
+          repository: SitnerVS/dzen-editorial-engine
+          ref: main
+          token: ${{ secrets.DZEN_SOURCE_TOKEN }}
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Build daily comparison plan or select the current hourly topic
+        id: slot
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          WORDSTAT_OAUTH_TOKEN: ${{ secrets.WORDSTAT_OAUTH_TOKEN }}
+        run: python -m app.topic_planner --github-output "$GITHUB_OUTPUT"
+
+      - name: Commit daily search-demand analysis
+        if: steps.slot.outputs.plan_created == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+users.noreply.github.com"
+          git add data/daily_topics.json data/search_trends/*.json
+          if git diff --cached --quiet; then
+            echo "Daily plan is unchanged; no commit is needed."
+            exit 0
+          fi
+          git commit -m "editorial: refresh daily comparison topic plan"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Check publication state and recover this slot's saved article
+        id: guard
+        if: steps.slot.outputs.skip != 'true' && steps.slot.outputs.plan_only != 'true'
+        env:
+          SLOT_KEY: ${{ steps.slot.outputs.slot_key }}
+          CATEGORY: ${{ steps.slot.outputs.category }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from zoneinfo import ZoneInfo
+          root = Path.cwd()
+          slot_key = os.environ["SLOT_KEY"]
+          category = os.environ["CATEGORY"]
+          msk = ZoneInfo("Europe/Moscow")
+          slot_dt = datetime.strptime(slot_key, "%Y-%m-%d-%H").replace(tzinfo=msk)
+          state_path = root / "data/dzen_published.json"
+          state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"published": {}, "pending": {}}
+          already = False
+          for item in state.get("published", {}).values():
+              if item.get("slot_key") == slot_key:
+                  already = True
+                  break
+              # New records have an explicit originating slot. Do not let a
+              # delayed confirmation in the next hour consume that next slot.
+              if item.get("slot_key"):
+                  continue
+              raw = str(item.get("published_at") or "")
+              try:
+                  published_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                  if published_at.tzinfo is None:
+                      published_at = published_at.replace(tzinfo=timezone.utc)
+                  published_at = published_at.astimezone(msk)
+                  if published_at.date() == slot_dt.date() and published_at.hour == slot_dt.hour:
+                      already = True
+                      break
+              except ValueError:
+                  pass
+          pending_article = ""
+          pending_missing = False
+          if not already:
+              for item in state.get("pending", {}).values():
+                  if item.get("slot_key") == slot_key:
+                      candidate = root / str(item.get("file") or "")
+                      if candidate.is_file():
+                          pending_article = candidate.relative_to(root).as_posix()
+                      else:
+                          pending_missing = True
+                      break
+          recovery_article = ""
+          if not already and not pending_article and not pending_missing:
+              for candidate in sorted((root / "articles").glob(f"*-{category}-*.md"), reverse=True):
+                  match = re.match(r"^(\d{8}T\d{6}Z)-", candidate.name)
+                  if not match:
+                      continue
+                  created = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).astimezone(msk)
+                  if created.date() == slot_dt.date() and created.hour == slot_dt.hour:
+                      recovery_article = candidate.relative_to(root).as_posix()
+                      break
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"already_published={str(already).lower()}\n")
+              output.write(f"pending_article={pending_article}\n")
+              output.write(f"pending_missing={str(pending_missing).lower()}\n")
+              output.write(f"recovery_article={recovery_article}\n")
+          print(f"SLOT_KEY={slot_key} ALREADY_PUBLISHED={already} PENDING={bool(pending_article)} RECOVERY={bool(recovery_article)}")
+          if pending_missing:
+              raise SystemExit("A Dzen draft for this slot exists but its article file is missing; refusing to create a duplicate.")
+          PY
+
+      - name: Generate the article
+        id: generate
+        if: steps.slot.outputs.skip != 'true' && steps.slot.outputs.plan_only != 'true' && steps.guard.outputs.already_published != 'true' && steps.guard.outputs.pending_article == '' && steps.guard.outputs.recovery_article == ''
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: openai/gpt-oss-120b
+          GROQ_FALLBACK_MODELS: openai/gpt-oss-120b,qwen/qwen3.8-27b
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          CATEGORY: ${{ steps.slot.outputs.category }}
+          EDITORIAL_TOPIC_OVERRIDE: ${{ inputs.topic || steps.slot.outputs.topic }}
+          INTERESTING_FACTS_TOPIC_OVERRIDE: ${{ inputs.topic || steps.slot.outputs.topic }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m app.main --category "$CATEGORY" 2>&1 | tee /tmp/editorial-generate.log
+          ARTICLE="$(sed -n 's/^ARTICLE_PATH=//p' /tmp/editorial-generate.log | tail -n 1)"
+          if [[ -z "$ARTICLE" || ! -f "$ARTICLE" ]]; then
+            echo "::error::Article generator did not return an existing article file."
+            exit 1
+          fi
+          echo "article=$ARTICLE" >> "$GITHUB_OUTPUT"
+
+      - name: Commit generated article and history
+        if: steps.generate.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+users.noreply.github.com"
+          git pull --rebase origin main
+          git add articles data/history.json public/feed.xml
+          if git diff --cached --quiet; then
+            echo "::error::No article or editorial history changes were produced."
+            exit 1
+          fi
+          git commit -m "content: generate hourly editorial article"
+          git push origin HEAD:main
+
+      - name: Publish or resume this exact article in Dzen
+        id: dzen_publish
+        if: steps.slot.outputs.skip != 'true' && steps.slot.outputs.plan_only != 'true' && steps.guard.outputs.already_published != 'true'
+        env:
+          DZEN_COOKIES_JSON: ${{ secrets.DZEN_COOKIES_JSON }}
+          DZEN_CSRF_TOKEN: ${{ secrets.DZEN_CSRF_TOKEN }}
+          DZEN_PUBLISHER_ID: ${{ secrets.DZEN_PUBLISHER_ID }}
+          DZEN_FP_TOKEN: ${{ secrets.DZEN_FP_TOKEN }}
+          EDITORIAL_SLOT_KEY: ${{ steps.slot.outputs.slot_key }}
+          PENDING_ARTICLE: ${{ steps.guard.outputs.pending_article }}
+          RECOVERY_ARTICLE: ${{ steps.guard.outputs.recovery_article }}
+          GENERATED_ARTICLE: ${{ steps.generate.outputs.article }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTICLE="$PENDING_ARTICLE"
+          [[ -n "$ARTICLE" ]] || ARTICLE="$RECOVERY_ARTICLE"
+          [[ -n "$ARTICLE" ]] || ARTICLE="$GENERATED_ARTICLE"
+          if [[ -z "$ARTICLE" || ! -f "$ARTICLE" ]]; then
+            echo "::error::No article file is available for this hourly slot."
+            exit 1
+          fi
+          if [[ -z "$DZEN_COOKIES_JSON" || -z "$DZEN_CSRF_TOKEN" || -z "$DZEN_PUBLISHER_ID" || -z "$DZEN_FP_TOKEN" ]]; then
+            echo "::error::Dzen authentication secrets are incomplete."
+            exit 1
+          fi
+          echo "article=$ARTICLE" >> "$GITHUB_OUTPUT"
+          for attempt in 1 2; do
+            echo "Dzen publication attempt $attempt/2 for slot $EDITORIAL_SLOT_KEY"
+            set +e
+            python -m app.dzen_publisher "$ARTICLE" 2>&1 | tee -a /tmp/dzen-publish.log
+            result=${PIPESTATUS[0]}
+            set -e
+            if [[ "$result" -eq 0 ]] && grep -Eq "DZEN_PUBLISHED=1|DZEN_ALREADY_PUBLISHED=1" /tmp/dzen-publish.log; then
+              echo "verified=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if grep -Eqi "captcha|required.*captcha|капч" /tmp/dzen-publish.log; then
+              echo "captcha_required=true" >> "$GITHUB_OUTPUT"
+              echo "::error::Dzen requested interactive CAPTCHA. The draft is retained; no bypass or blind retry."
+              exit "$result"
+            fi
+            if [[ "$attempt" -lt 2 ]]; then
+              echo "Temporary publication failure; retrying the same saved article and Dzen draft."
+              sleep 15
+            fi
+          done
+          exit 1
+
+      - name: Notify Telegram that Dzen requires CAPTCHA confirmation
+        if: always() && steps.dzen_publish.outputs.captcha_required == 'true'
+        continue-on-error: true
+        env:
+          OSINT_TELEGRAM_NOTIFY_URL: https://osint-telegram-gateway-staging.vssitner.workers.dev/internal/dzen-notify
+          OSINT_TELEGRAM_NOTIFY_SECRET: ${{ secrets.OSINT_TELEGRAM_NOTIFY_SECRET }}
+          CATEGORY: ${{ steps.slot.outputs.category }}
+          ARTICLE: ${{ steps.dzen_publish.outputs.article }}
+        run: python -m app.telegram_notify --status captcha --category "$CATEGORY" --article "$ARTICLE" --log /tmp/dzen-publish.log
+
+      - name: Persist Dzen publication state
+        if: always() && steps.slot.outputs.skip != 'true' && steps.slot.outputs.plan_only != 'true' && steps.guard.outputs.already_published != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f data/dzen_published.json ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+users.noreply.github.com"
+            git pull --rebase origin main
+            git add data/dzen_published.json
+            if ! git diff --cached --quiet; then
+              git commit -m "state: record hourly Dzen publication result"
+              git push origin HEAD:main
+            fi
+          fi
+
+      - name: Notify Telegram after feed-verified publication
+        if: steps.dzen_publish.outputs.verified == 'true'
+        continue-on-error: true
+        env:
+          OSINT_TELEGRAM_NOTIFY_URL: https://osint-telegram-gateway-staging.vssitner.workers.dev/internal/dzen-notify
+          OSINT_TELEGRAM_NOTIFY_SECRET: ${{ secrets.OSINT_TELEGRAM_NOTIFY_SECRET }}
+          CATEGORY: ${{ steps.slot.outputs.category }}
+          ARTICLE: ${{ steps.dzen_publish.outputs.article }}
+        run: python -m app.telegram_notify --status success --category "$CATEGORY" --article "$ARTICLE" --log /tmp/dzen-publish.log
+
+      - name: Fail the run unless Dzen publication was confirmed
+        if: steps.slot.outputs.skip != 'true' && steps.slot.outputs.plan_only != 'true' && steps.guard.outputs.already_published != 'true' && steps.dzen_publish.outputs.verified != 'true'
+        run: exit 1
